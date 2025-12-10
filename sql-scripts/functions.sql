@@ -1056,6 +1056,151 @@ LANGUAGE plpgsql;
 -- Dabei werden alle circuits bzw. line (pro spannungsebne) zunächst einzeln durchgegangen ...
 --- ...und deren Topologie wird unabhängig berechnet
 
+
+CREATE OR REPLACE FUNCTION pgr_createTopology_compat(
+    edge_table TEXT,
+    tolerance  DOUBLE PRECISION,
+    the_geom   TEXT DEFAULT 'geom',
+    id         TEXT DEFAULT 'id',
+    source     TEXT DEFAULT 'source',
+    target     TEXT DEFAULT 'target',
+    rows_where TEXT DEFAULT 'true',
+    clean      BOOLEAN DEFAULT FALSE
+)
+RETURNS VARCHAR AS
+$$
+DECLARE
+    v_schema         TEXT;
+    v_table          TEXT;
+    v_edge_qual      TEXT;
+    v_vertices_table TEXT;
+    v_vertices_qual  TEXT;
+    v_sql            TEXT;
+    v_inner_sql      TEXT;
+BEGIN
+    -- 1. Tabellennamen aus edge_table ermitteln
+    SELECT n.nspname, c.relname
+    INTO v_schema, v_table
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.oid = edge_table::regclass;
+
+    IF v_schema IS NULL THEN
+        RAISE EXCEPTION 'Edge table % does not exist', edge_table;
+    END IF;
+
+    v_edge_qual      := format('%I.%I', v_schema, v_table);
+    v_vertices_table := v_table || '_vertices_pgr';
+    v_vertices_qual  := format('%I.%I', v_schema, v_vertices_table);
+
+    IF rows_where IS NULL OR btrim(rows_where) = '' THEN
+        rows_where := 'true';
+    END IF;
+
+    -- 2. Optional alte Topologie aufräumen
+    IF clean THEN
+        v_sql := format('DROP TABLE IF EXISTS %s', v_vertices_qual);
+        EXECUTE v_sql;
+
+        v_sql := format(
+            'UPDATE %s SET %I = NULL, %I = NULL',
+            v_edge_qual, source, target
+        );
+        EXECUTE v_sql;
+    END IF;
+
+    -- 3. Vertices-Tabelle mit pgr_extractVertices erstellen
+    v_sql := format('DROP TABLE IF EXISTS %s', v_vertices_qual);
+    EXECUTE v_sql;
+
+    -- Inneres SELECT als reinen String bauen
+    v_inner_sql := format(
+        'SELECT %1$I AS id, %2$I AS geom
+           FROM %3$s
+          WHERE %4$s
+       ORDER BY %1$I',
+        id, the_geom, v_edge_qual, rows_where
+    );
+
+    -- pgr_extractVertices-Aufruf mit korrekt gequotetem SQL
+    v_sql := format(
+        'CREATE TABLE %s AS
+         SELECT *
+         FROM pgr_extractVertices(%L)',
+        v_vertices_qual,
+        v_inner_sql   -- %L = als Stringliteral korrekt gequotet
+    );
+    EXECUTE v_sql;
+
+    -- 4. source setzen (ausgehende Kanten)
+    v_sql := format(
+        'WITH out_going AS (
+             SELECT id AS vid, unnest(out_edges) AS eid
+             FROM %s
+         )
+         UPDATE %s AS e
+         SET %I = o.vid
+         FROM out_going AS o
+         WHERE e.%I = o.eid',
+        v_vertices_qual,
+        v_edge_qual,
+        source,
+        id
+    );
+    EXECUTE v_sql;
+
+    -- 5. target setzen (eingehende Kanten)
+    v_sql := format(
+        'WITH in_coming AS (
+             SELECT id AS vid, unnest(in_edges) AS eid
+             FROM %s
+         )
+         UPDATE %s AS e
+         SET %I = i.vid
+         FROM in_coming AS i
+         WHERE e.%I = i.eid',
+        v_vertices_qual,
+        v_edge_qual,
+        target,
+        id
+    );
+    EXECUTE v_sql;
+
+    -- 6. Indexe anlegen
+    v_sql := format(
+        'CREATE INDEX IF NOT EXISTS %I ON %s (%I)',
+        v_table || '_' || id || '_idx', v_edge_qual, id
+    );
+    EXECUTE v_sql;
+
+    v_sql := format(
+        'CREATE INDEX IF NOT EXISTS %I ON %s USING GIST (%I)',
+        v_table || '_' || the_geom || '_gist', v_edge_qual, the_geom
+    );
+    EXECUTE v_sql;
+
+    v_sql := format(
+        'CREATE INDEX IF NOT EXISTS %I ON %s (%I)',
+        v_table || '_' || source || '_idx', v_edge_qual, source
+    );
+    EXECUTE v_sql;
+
+    v_sql := format(
+        'CREATE INDEX IF NOT EXISTS %I ON %s (%I)',
+        v_table || '_' || target || '_idx', v_edge_qual, target
+    );
+    EXECUTE v_sql;
+
+    RETURN 'OK';
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE NOTICE 'pgr_createTopology_compat failed: %', SQLERRM;
+        RETURN 'FAIL';
+END;
+$$
+LANGUAGE plpgsql;
+
+
 CREATE OR REPLACE FUNCTION otg_create_grid_topology (v_table TEXT) RETURNS void
 AS $$
 DECLARE
@@ -1105,11 +1250,22 @@ LOOP
 				AND main.frequency = '|| v_params.frequency;
 
 	-- pgr_createTopology should not be used.
-	PERFORM pgr_createTopology (	'branch_data_topo', --source und target werden immer wieder auf NULL gesetzt und Topologie neu berechnet.
-					0.0001, -- Is this a good buffer? 0.0005 was not good, some lines have been deleted which should not have been.
-					'way', 
-					'line_id');
-			
+	-- PERFORM pgr_createTopology (	'branch_data_topo', --source und target werden immer wieder auf NULL gesetzt und Topologie neu berechnet.
+	-- 				0.0001, -- Is this a good buffer? 0.0005 was not good, some lines have been deleted which should not have been.
+	-- 				'way', 
+	-- 				'line_id');
+	
+	-- new workflow after pgr_createTopology deprecated in version 3.8.0
+	PERFORM pgr_createTopology_compat(
+				'branch_data_topo',
+				0.0001,
+				'way',
+				'line_id',
+				'source',
+				'target',
+				'true',
+				TRUE
+				);
 
 	SELECT max(id) INTO v_max_id FROM bus_data; -- Höchste bereits in der Tabelle bus-data vrohandene ID
 	IF v_max_id IS NULL THEN v_max_id := 0; END IF; -- Wenn Tabelle bus_data leer, dann...
