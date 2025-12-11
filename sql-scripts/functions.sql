@@ -1115,7 +1115,7 @@ BEGIN
 
     -- Inneres SELECT als reinen String bauen
     v_inner_sql := format(
-        'SELECT %1$I AS id, %2$I AS geom
+        'SELECT %1$I AS id, %2$I AS the_geom
            FROM %3$s
           WHERE %4$s
        ORDER BY %1$I',
