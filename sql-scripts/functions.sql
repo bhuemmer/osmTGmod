@@ -376,6 +376,7 @@ BEGIN
 	
 	FOR v_members IN
 	SELECT id, members FROM power_circuits -- also alle
+		ORDER BY id
 		
 		LOOP
 
@@ -614,6 +615,7 @@ BEGIN
 						
 				AND id != v_id_line.id -- Soll nicht sich selbst auswählen
 				AND NOT otg_array_search (v_volt, voltage_array) IS NULL -- Spannung muss in gesuchter Leitung (mindestens einmal) vorhanden sein vorhanden sein!
+				ORDER BY id
  
 		LOOP
 			v_lev := otg_array_search_2 (v_volt, v_current_line.voltage_array); -- Alle möglichen spannugns-Nachbarn der benachbarten Leitung (Array)
@@ -644,6 +646,7 @@ BEGIN
 						
 				AND id != v_id_line.id -- Soll nicht sich selbst auswählen
 				AND NOT otg_array_search (v_volt, voltage_array) IS NULL -- Spannung muss in gesuchter Leitung vorhanden sein vorhanden sein!
+				ORDER BY id
 
 		LOOP
 			v_lev := otg_array_search_2 (v_volt, v_current_line.voltage_array); -- Alle möglichen spannugns-Nachbarn der benachbarten Leitung (Array)
@@ -778,6 +781,7 @@ FOR v_id_line IN
 		-- An dieser Stelle reicht es nicht aus zu untersuchen, ob alle Cables vorhanden sind.
 		-- Auch ob alle Frequencys vorhanden sind müsste untersucht werden
 		-- Dies geschieht aber bereits am Anfang der 1. Schleife und sollte daher schnell genug sein.
+		ORDER BY id
 		
 LOOP
 	
@@ -1016,7 +1020,7 @@ FOR v_line IN
 		length,
 		startpoint,
 		endpoint
-		FROM power_line
+		FROM power_line ORDER BY id
 LOOP
 	FOR i IN 1..v_line.numb_volt_lev LOOP
 		INSERT INTO  power_line_sep (relation_id, 
@@ -1078,7 +1082,7 @@ BEGIN
             ST_SetSRID($1::geometry, $2),
             $3
         )
-        ORDER BY ST_Distance(the_geom, ST_SetSRID($1::geometry, $2))
+        ORDER BY ST_Distance(the_geom, ST_SetSRID($1::geometry, $2)), id
         LIMIT 1
     $f$, p_vert_qual);
 
@@ -1120,6 +1124,7 @@ DECLARE
     v_sql            TEXT;
 
     v_srid integer;
+    v_empty boolean;
 
     r record;
 
@@ -1165,6 +1170,11 @@ BEGIN
     EXECUTE v_sql INTO v_srid;
 
     IF v_srid IS NULL THEN
+        EXECUTE format('SELECT NOT EXISTS (SELECT 1 FROM %s)', v_edge_qual) INTO v_empty;
+        IF v_empty THEN
+            RETURN 'OK';
+        END IF;
+
         RAISE EXCEPTION 'Cannot determine SRID from %.% (column %). Is the geometry column empty or NULL?',
             v_schema, v_table, the_geom;
     END IF;
@@ -1250,11 +1260,6 @@ BEGIN
                    v_table || '_' || target || '_idx', v_edge_qual, target);
 
     RETURN 'OK';
-
-EXCEPTION
-    WHEN OTHERS THEN
-        RAISE NOTICE 'pgr_createTopology_compat failed: %', SQLERRM;
-        RETURN 'FAIL';
 END;
 $$;
 
@@ -1280,7 +1285,7 @@ FOR v_params IN
 		-- Geht alle Kombinationen von Spannung und Frequenz (und relation_id) durch 
 		-- Dadurch werden circuits nur einzeln betrachtet
 		-- alle Ways haben die selbe relation_id und werde daher (automatisch) nicht nach dieser unterschieden
-	EXECUTE 'SELECT relation_id as id, voltage, frequency FROM '|| v_table ||' GROUP BY relation_id, voltage, frequency' 
+	EXECUTE 'SELECT relation_id as id, voltage, frequency FROM '|| v_table ||' GROUP BY relation_id, voltage, frequency ORDER BY relation_id, voltage, frequency' 
 LOOP	
 
 	-- Diese Tabelle wird von creatTopology automatisch erstellt und muss vorher gelöscht werden			
@@ -1410,7 +1415,7 @@ SET 	substation_id =
 	(SELECT power_substation.id AS substation_id 
 		FROM power_substation, bus_data bus
 		WHERE 	ST_Intersects ((ST_Buffer(bus.the_geom::geography, 400)::geometry), power_substation.poly) AND -- = 300m Buffer -- to check:::geography, 400)::geometry
-			bus.id = bus_data.id LIMIT 1), -- verbessern: wenn Buffer mehrer findet soll er nähere nehmen!
+			bus.id = bus_data.id ORDER BY power_substation.id IS NOT DISTINCT FROM (SELECT other.substation_id FROM power_circ_members m JOIN bus_data other ON other.id = CASE WHEN m.f_bus = bus.id THEN m.t_bus ELSE m.f_bus END WHERE bus.id IN (m.f_bus, m.t_bus) AND other.substation_id IS NOT NULL ORDER BY m.relation_id, m.line_id LIMIT 1), ST_Distance (bus.the_geom::geography, power_substation.poly::geography), power_substation.id LIMIT 1), -- naechste Substation, aber nicht die am anderen Ende desselben Stromkreises (sonst Schleife, die danach geloescht wird); bei Gleichstand kleinste OSM-ID
 	buffered = true
 	WHERE cnt = 1 AND substation_id IS NULL AND origin = 'rel';
 -- Das obere Update wird immer durchgeführt, auch wenn keine Überschneidung stattfindet
@@ -1445,7 +1450,7 @@ BEGIN
 	
 	-- Sucht den (einen) Stromkreis, der neu verbunden wurde und Speichert die Cables in v-cables_relation
 	-- (Kann nur einen geben, da Bus vorher nur einen Anschluss hatte und Busses noch nicht verbunden wurden (nur "verschoben" in Substation)
-	SELECT cables INTO v_cables_relation FROM power_circ_members WHERE f_bus = v_bus_id OR t_bus = v_bus_id;
+	SELECT cables INTO v_cables_relation FROM power_circ_members WHERE f_bus = v_bus_id OR t_bus = v_bus_id ORDER BY relation_id, line_id LIMIT 1;
 	--v_cables_relation := v_member.cables;
 
 	-- Geht alle power_lines durch, die (geometrisch) an diesem Bus und zudem mit derselben substation verbunden sind
@@ -1455,6 +1460,7 @@ BEGIN
 				v_bus.substation_id = point_substation_id [2]) OR
 				(v_bus.the_geom = power_line.endpoint AND
 				v_bus.substation_id = point_substation_id [1]))
+			ORDER BY id
 			
 			
 	LOOP
@@ -1572,7 +1578,7 @@ UPDATE bus_data
 			FROM nuts_poly nuts, bus_data bus
 			WHERE 	ST_Within (bus.the_geom, nuts.geom) AND
 				nuts.stat_levl_ = 0 AND -- Damit nur komplette Länder berücksichtigt werden (erste Ebene)
-				bus.id = bus_data.id LIMIT 1)
+				bus.id = bus_data.id ORDER BY nuts.nuts_id LIMIT 1)
 	WHERE origin = v_origin;
 
 
@@ -1582,7 +1588,7 @@ UPDATE bus_data
 		(SELECT power_substation.id -- nimm die substation_id
 		FROM power_substation, bus_data bus
 		WHERE ST_Within (bus.the_geom, power_substation.poly) AND -- liegt ein ein bus innerhalb einer station?
-			bus.id = bus_data.id LIMIT 1)
+			bus.id = bus_data.id ORDER BY power_substation.id LIMIT 1)
 	WHERE origin = v_origin;
 		
 
@@ -1621,6 +1627,7 @@ BEGIN
 	-- Es wird durch alle power_circ_members geloopt
 	FOR v_member IN
 		SELECT line_id as id, relation_id, voltage, cables, wires, frequency, way FROM power_circ_members
+		ORDER BY relation_id, line_id, voltage, frequency
 		
 	LOOP
 		-- Für jeden Stromkreis-Member wird die zugehörige Power_line ausgewählt
@@ -1723,7 +1730,7 @@ BEGIN
 	FOR v_subst_bus IN
 		SELECT distinct on (substation_id, voltage, frequency) voltage, substation_id, frequency, cntr_id 
 		FROM bus_data
-		WHERE NOT substation_id IS NULL 
+		WHERE NOT substation_id IS NULL ORDER BY substation_id, voltage, frequency, cntr_id 
 	LOOP
 	CONTINUE WHEN v_subst_bus.substation_id = 0; --Auslands-Umspannwerke bestehen aus "offenen Enden" und können nicht ineinander verbunden werden
 
@@ -1784,10 +1791,11 @@ BEGIN
 FOR v_substation IN 
 	SELECT id FROM power_substation 
 		WHERE id IN (SELECT substation_id FROM bus_data WHERE NOT substation_id IS NULL) -- Dadurch fallen die offenen Auslands-Enden raus (diese brauchen auch nicht betrachtet zu werden)
+		ORDER BY id
 	LOOP
 	-- v_buses ist Array mit den IDs der Knoten innerhalb eines Umspannwerks
 	-- Dieses wird nach Spannung geordnet, damit Spannungsebenen der Reihe nach verbunden werden.
-	v_buses := (SELECT ARRAY (SELECT id FROM bus_data WHERE substation_id = v_substation.id ORDER BY voltage)); --v_substation.id);
+	v_buses := (SELECT ARRAY (SELECT id FROM bus_data WHERE substation_id = v_substation.id ORDER BY voltage, id)); --v_substation.id);
 	v_numb_buses := array_length (v_buses, 1);
 	IF v_numb_buses > 1 THEN -- Also verschiedene, betrachtete Spannungsebenen im Umspannwerk ankommen
 		FOR i IN 1..(v_numb_buses - 1) 
@@ -1836,7 +1844,7 @@ BEGIN
 	FOR v_line IN
 		SELECT line_ids, ways, f_bus, t_bus, length, relation_id, voltage, cables, frequency, wires, power 
 		FROM branch_data
-		WHERE branch_data.f_bus = v_vertex_id OR branch_data.t_bus = v_vertex_id
+		WHERE branch_data.f_bus = v_vertex_id OR branch_data.t_bus = v_vertex_id ORDER BY branch_id
 	LOOP 
 	IF v_line.f_bus <> v_vertex_id THEN v_f_bus_t_bus := v_f_bus_t_bus || v_line.f_bus; END IF;
 	IF v_line.t_bus <> v_vertex_id THEN v_f_bus_t_bus := v_f_bus_t_bus || v_line.t_bus; END IF;
@@ -1924,7 +1932,7 @@ BEGIN
 	v_count_new := (SELECT count (*) FROM bus_data Where cnt = 2 AND substation_id IS NULL);
 	
 	LOOP
-	PERFORM otg_simplify_branches (id) FROM bus_data WHERE cnt = 2 AND substation_id IS NULL; 
+	PERFORM otg_simplify_branches (id) FROM (SELECT id FROM bus_data WHERE cnt = 2 AND substation_id IS NULL ORDER BY id) AS v_ordered_busses; 
 	DELETE FROM branch_data WHERE f_bus = t_bus;
 	UPDATE bus_data 
 	SET cnt = (SELECT count (*) 
@@ -2009,6 +2017,8 @@ v_smallest_dist FLOAT;
 v_this_dist FLOAT;
 
 v_trans_bus_id BIGINT;
+v_best_rank INT;
+v_this_rank INT;
 v_trans_bus_geom geometry (Point, 4326);
 v_branch_id BIGINT;
 v_branch_way geometry (Linestring, 4326);
@@ -2063,21 +2073,21 @@ IF (SELECT val_bool
 		v_cnt := (SELECT count(*) FROM transfer_busses_connect);
 		EXIT WHEN v_cnt = 0;
 		raise notice '%',v_cnt;
-		v_smallest_dist := 25000; -- Initial buffer size in meters (=100km)...
+		v_smallest_dist := 25000; v_best_rank := 3; -- Initial buffer size in meters (=100km)...
 		--... within this buffer the first buffer will search for lines...
 		--... the buffer will then be lowered anytime a closer line is found.
 
 		-- Loops through all (left) transfer busses...
 		-- ... and finds the one that is closest to the grid.
 		FOR v_trans_bus IN
-			SELECT osm_id, center_geom
-				FROM transfer_busses_connect
+			SELECT osm_id, center_geom, target_voltage, voltages
+				FROM transfer_busses_connect ORDER BY osm_id, object_type, ST_X(center_geom), ST_Y(center_geom)
 		
 		LOOP
 			-- Geography allows to set the buffer radius in meters.
 			-- ...Then casted back to geometry.
 			v_search_area := ST_Buffer(	v_trans_bus.center_geom::geography, 
-							v_smallest_dist)::geometry;
+							CASE WHEN v_best_rank IN (1, 2) THEN 5000 ELSE v_smallest_dist END)::geometry;
 							
 		 	FOR v_branch IN --For every transfer bus (upper loop), this loop goes through...
 					--... all lines within (intersection) the buffer
@@ -2085,7 +2095,7 @@ IF (SELECT val_bool
 					FROM branch_data
 					WHERE 	ST_Intersects(way, v_search_area) AND -- Just the lines/branches within that intersect the buffer
 						frequency = 50 -- Only connection to AC system
-					--ORDER BY voltage -- begin with smallest voltage in order to preferably connect to 110 kV branches
+					ORDER BY voltage, branch_id -- begin with smallest voltage in order to preferably connect to 110 kV branches
 			LOOP
 				-- Calculates the exact shortest Distance on the Line:
 				v_closest_point_geom := ST_ClosestPoint(v_branch.way, v_trans_bus.center_geom); -- Geometry of closest point				
@@ -2093,9 +2103,11 @@ IF (SELECT val_bool
 								v_closest_point_geom::geography); -- in meters
 					-- ST_Distance looks for uses closest point on line!
 				
-				IF (v_this_dist < v_smallest_dist) 	-- In case a new smallest distance is found...
+				v_this_rank := CASE WHEN v_this_dist > 5000 THEN 3 WHEN v_branch.voltage = v_trans_bus.target_voltage THEN 0 WHEN v_branch.voltage = ANY (v_trans_bus.voltages) THEN 1 ELSE 2 END;
+				IF (v_this_rank < v_best_rank OR (v_this_rank = v_best_rank AND v_this_dist < v_smallest_dist)) 	-- In case a new smallest distance is found...
 									-- ...values are saved for the current transfer bus and the current line
 					THEN 
+					v_best_rank := v_this_rank;
 					v_smallest_dist := v_this_dist;
 					v_trans_bus_id := v_trans_bus.osm_id;
 					v_trans_bus_geom := v_trans_bus.center_geom;
@@ -2346,8 +2358,7 @@ IF (SELECT val_bool
  	
  	UPDATE bus_data SET discovered = false;
  	PERFORM otg_graph_dfs ((SELECT id FROM bus_data 
-			WHERE substation_id = (SELECT val_int FROM abstr_values WHERE val_description = 'main_station')
-			LIMIT 1));
+			WHERE substation_id = (SELECT val_int FROM abstr_values WHERE val_description = 'main_station') ORDER BY voltage DESC, id LIMIT 1));
  	
  	CREATE TABLE subgrids_connect AS -- New table for calculation of subgrids to connect 
 	SELECT * FROM bus_data
@@ -2359,7 +2370,7 @@ IF (SELECT val_bool
 	 	v_smallest_dist := 100000; -- find closest substation of main grid; Initial buffer size in meters (=100km)...
  			FOR v_subgrid_bus IN
  				SELECT id, the_geom, voltage
- 					FROM subgrids_connect
+ 					FROM subgrids_connect ORDER BY id
  			LOOP
  				FOR v_substation IN
  				SELECT id, voltage, the_geom
@@ -2368,7 +2379,7 @@ IF (SELECT val_bool
 						NOT substation_id IS NULL AND -- Only substations no grid busses (Muffen) -- DK: entfernt, weil zum Zeitpunkt der Ausführung des Skiptes diemeisten Muffen schon entfernt wurden.
  						discovered = true AND
  						voltage = v_subgrid_bus.voltage
- 					ORDER BY voltage -- Will be connected with 110 preferred
+ 					ORDER BY id -- voltage is fixed by the filter above
  				LOOP
  				v_this_dist := ST_Distance(	v_subgrid_bus.the_geom::geography, 
  								v_substation.the_geom::geography);
@@ -2492,18 +2503,18 @@ DECLARE
 BEGIN
 
 CREATE TABLE buffers_matching_busses AS 
-    (SELECT ST_Buffer_Meters(the_geom,10) AS buffer, voltage AS base_kv, array_agg(substation_id) AS substation_ids, count(*) 
+    (SELECT ST_Buffer_Meters(the_geom,10) AS buffer, voltage AS base_kv, array_agg(substation_id) AS substation_ids, count(*), ST_X(the_geom) AS x, ST_Y(the_geom) AS y 
         FROM bus_data GROUP BY the_geom, base_kv ORDER BY base_kv,count(the_geom));
 
-FOR this_buffer, this_base_kv IN (SELECT buffer,base_kv FROM buffers_matching_busses) LOOP
+FOR this_buffer, this_base_kv IN (SELECT buffer,base_kv FROM buffers_matching_busses ORDER BY base_kv, "count", x, y) LOOP
         UPDATE branch_data 
-            SET t_bus=(SELECT id FROM bus_data WHERE (ST_Intersects(the_geom,this_buffer) AND voltage=this_base_kv) ORDER BY substation_id LIMIT 1) 
+            SET t_bus=(SELECT id FROM bus_data WHERE (ST_Intersects(the_geom,this_buffer) AND voltage=this_base_kv) ORDER BY substation_id, id LIMIT 1) 
             WHERE t_bus IN (SELECT id FROM bus_data WHERE (ST_Intersects(the_geom,this_buffer) AND voltage=this_base_kv));
         UPDATE branch_data 
-            SET f_bus=(SELECT id FROM bus_data WHERE (ST_Intersects(the_geom,this_buffer) AND voltage=this_base_kv) ORDER BY substation_id LIMIT 1) 
+            SET f_bus=(SELECT id FROM bus_data WHERE (ST_Intersects(the_geom,this_buffer) AND voltage=this_base_kv) ORDER BY substation_id, id LIMIT 1) 
             WHERE f_bus IN (SELECT id FROM bus_data WHERE (ST_Intersects(the_geom,this_buffer) AND voltage=this_base_kv));
         DELETE FROM bus_data
-            WHERE id IN (SELECT id FROM bus_data WHERE (ST_Intersects(the_geom,this_buffer) AND voltage=this_base_kv) ORDER BY substation_id OFFSET 1);
+            WHERE id IN (SELECT id FROM bus_data WHERE (ST_Intersects(the_geom,this_buffer) AND voltage=this_base_kv) ORDER BY substation_id, id OFFSET 1);
         DELETE FROM branch_data
             WHERE t_bus=f_bus;  
     END LOOP;
@@ -3191,7 +3202,7 @@ BEGIN
 	UPDATE power_relations 
 		SET members = 	ARRAY (	SELECT member_id 
 					FROM power_relation_members mem
-					WHERE mem.relation_id = power_relations.id);
+					WHERE mem.relation_id = power_relations.id ORDER BY sequence_id, member_id);
 	DROP TABLE power_relation_members;
 	-- Müssen gelöscht werden, da oben nur nach W gefiltert wurde. Manche Rels enthalten jedoch rels
 	-- Diese werden so gelöscht. Stromkreise könnten sich sonst selber enthalten.
@@ -3559,19 +3570,21 @@ DROP TABLE IF EXISTS branch_data_new_busses;
 CREATE TABLE branch_data_new_busses AS
 (SELECT DISTINCT
     ln_id,
+    ln_voltage,
     pt_geom
 FROM
     (SELECT 
         ln.way AS ln_geom,
         pt.the_geom AS pt_geom, 
         ln.line_id AS ln_id, 
+        ln.voltage AS ln_voltage,
         pt.id AS pt_id
     FROM 
         bus_data pt, 
         power_line_sep ln 
     WHERE 
         ST_DWithin(pt.the_geom, ln.way, 0.0) AND ST_GeometryType(ST_LineMerge(ln.way))='ST_LineString' AND
-        ln.voltage=pt.voltage
+        ln.voltage=pt.voltage AND ln.frequency IN (50, 0)
     ORDER BY ln_id,pt_geom,pt_id
     ) as subquery
 WHERE ST_LineLocatePoint(ST_LineMerge(ln_geom), pt_geom)>0 and ST_LineLocatePoint(ST_LineMerge(ln_geom), pt_geom) < 1
@@ -3586,10 +3599,10 @@ IF (SELECT COUNT(*) FROM branch_data_new_busses) < 1 THEN
 	EXIT;
 END IF;
 FOR branch IN
-	SELECT * FROM branch_data_new_busses
+	SELECT * FROM branch_data_new_busses ORDER BY ln_id, ln_voltage, ST_X(pt_geom), ST_Y(pt_geom)
 	LOOP
 	--select corresponding element in power_line_sep (if it still should exist and was not already deleted...)
-	FOR branch_data IN SELECT * FROM power_line_sep WHERE line_id=branch.ln_id LIMIT 1
+	FOR branch_data IN SELECT ctid AS row_ctid, * FROM power_line_sep WHERE line_id=branch.ln_id AND voltage=branch.ln_voltage AND frequency IN (50, 0) ORDER BY frequency, cables, wires
 		LOOP
 		-- Calculates the exact shortest Distance on the Line:
 		v_closest_point_loc := ST_LineLocatePoint(branch_data.way,branch.pt_geom); --FLOAT between 0 and 1 (Point location on Linesting)
@@ -3605,7 +3618,7 @@ FOR branch IN
 			VALUES (v_max_bus_id + 1, 
 				branch.pt_geom, -- geom of transfer_bus to be connected
 				branch_data.voltage, -- voltage of branch to connect to
-				50,
+				branch_data.frequency,
 				'DE');
 
 				
@@ -3626,10 +3639,11 @@ FOR branch IN
 		v_new_way_length_end := ST_length(v_new_way_geom_end::geography);
 
 				
-		DELETE FROM power_line_sep WHERE line_id = branch.ln_id; -- Old branch needs to be deleted
+		-- highest line_id before the DELETE, so it is never handed out again
+		v_max_line_id := (SELECT max(line_id) FROM power_line_sep);
+		DELETE FROM power_line_sep WHERE ctid = branch_data.row_ctid; -- Only this level is replaced
 			
 		-- 2 branches are inserted: the 2 substrings, and the new one to connect the transfer bus:
-		v_max_line_id := (SELECT max(line_id) FROM power_line_sep);	
 			
 		-- Start Substring Branch:
 		INSERT INTO power_line_sep (	line_id,
@@ -3638,7 +3652,7 @@ FOR branch IN
 						t_bus,
 						voltage,
 						cables,
-						frequency,
+						frequency, relation_id, wires,
 						power,
 						way)
 				VALUES(	v_max_line_id + 1,
@@ -3647,7 +3661,7 @@ FOR branch IN
 					v_max_bus_id + 1, --the new grid bus
 					branch_data.voltage,
 					branch_data.cables,
-					50,
+					branch_data.frequency, branch_data.relation_id, branch_data.wires,
 					branch_data.power,
 					v_new_way_geom_start);
 
@@ -3658,7 +3672,7 @@ FOR branch IN
 						t_bus,
 						voltage,
 						cables,
-						frequency,
+						frequency, relation_id, wires,
 						power,
 						way)
 				VALUES(	v_max_line_id + 2,
@@ -3667,7 +3681,7 @@ FOR branch IN
 					branch_data.t_bus,
 					branch_data.voltage,
 					branch_data.cables,
-					50,
+					branch_data.frequency, branch_data.relation_id, branch_data.wires,
 					branch_data.power,
 					v_new_way_geom_end);
 
@@ -3678,19 +3692,21 @@ DROP TABLE IF EXISTS branch_data_new_busses;
 CREATE TABLE branch_data_new_busses AS
 (SELECT DISTINCT
     ln_id,
+    ln_voltage,
     pt_geom
 FROM
     (SELECT 
         ln.way AS ln_geom,
         pt.the_geom AS pt_geom, 
         ln.line_id AS ln_id, 
+        ln.voltage AS ln_voltage,
         pt.id AS pt_id
     FROM 
         bus_data pt, 
         power_line_sep ln 
     WHERE 
         ST_DWithin(pt.the_geom, ln.way, 0.0) AND ST_GeometryType(ST_LineMerge(ln.way))='ST_LineString' AND
-        ln.voltage=pt.voltage
+        ln.voltage=pt.voltage AND ln.frequency IN (50, 0)
     ORDER BY ln_id,pt_geom,pt_id
     ) as subquery
 WHERE ST_LineLocatePoint(ST_LineMerge(ln_geom), pt_geom)>0 and ST_LineLocatePoint(ST_LineMerge(ln_geom), pt_geom) < 1
@@ -3728,7 +3744,7 @@ CREATE TABLE bus_data_combine_busses AS
 );
 
 FOR busses IN
-	SELECT * FROM bus_data_combine_busses
+	SELECT * FROM bus_data_combine_busses ORDER BY pt1_id, pt2_id
 	LOOP
 	IF (SELECT COUNT(*) FROM bus_data WHERE id=busses.pt1_id)>0 THEN
 		UPDATE power_line_sep SET f_bus=busses.pt1_id WHERE f_bus=busses.pt2_id;

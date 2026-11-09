@@ -23,6 +23,10 @@ Contains: Proportions of the code by "Wuppertal Institut" (2015)
 -- Convention:
 -- All values are in SI units if not stated within the name of the variable.
 
+-- REPRODUZIERBARKEIT: keine parallelen oder versetzt startenden Scans
+SET max_parallel_workers_per_gather = 0;
+SET synchronize_seqscans = off;
+
 -- DROP TABLES
 
 DROP TABLE IF EXISTS power_circ_members;
@@ -175,11 +179,11 @@ ALTER TABLE power_line ADD COLUMN point_substation_id BIGINT [2];
 UPDATE power_line SET 	point_substation_id [1] = (SELECT power_substation.id
 							FROM power_substation
 							WHERE ST_Within(startpoint, power_substation.poly)
-							LIMIT 1),
+							ORDER BY power_substation.id LIMIT 1),
 			point_substation_id [2] = (SELECT power_substation.id
 							FROM power_substation
 							WHERE ST_Within(endpoint, power_substation.poly)
-							LIMIT 1);
+							ORDER BY power_substation.id LIMIT 1);
 
 -- Alle Leitungen, die Anfang und Ende innerhalb einer Substation liegen werden gelöscht.							
 DELETE FROM power_line WHERE point_substation_id [1] = point_substation_id [2];	
@@ -728,7 +732,7 @@ SELECT otg_substract_circuits() ;
 -- Durch den Puffer (otg_connect_dead_ends_with_substation) "Übergangene" Leitungen (Tabelle power_line) werden angepasst.
 -- Dies kann erst an dieser Stelle geschehen, damit nicht unkontrolliert cables von den power_line abgezogen werden
 -- (sondern nur die bis hier überbleibenden betrachtet werden)
-SELECT otg_substract_cables_within_buffer (id) FROM bus_data WHERE buffered = true AND origin = 'rel'; -- Also alle erfolgreichen Buffer
+SELECT otg_substract_cables_within_buffer (id) FROM (SELECT id FROM bus_data WHERE buffered = true AND origin = 'rel' ORDER BY id) AS v_ordered_busses; -- Also alle erfolgreichen Buffer
 
 
 	-- PROBLEM: CABLE CONFLICT
@@ -905,7 +909,7 @@ INSERT INTO  branch_data (	relation_id,
 				frequency, 
 				power)
 	SELECT relation_id, line_id, f_bus, t_bus, length, way, voltage, cables, wires, frequency, power 
-		FROM power_circ_members;
+		FROM power_circ_members ORDER BY relation_id, line_id, voltage, frequency, f_bus, t_bus, cables, wires;
 		
 INSERT INTO  branch_data (	relation_id, 
 				line_id,
@@ -919,7 +923,7 @@ INSERT INTO  branch_data (	relation_id,
 				frequency,
 				power)
 	SELECT relation_id, line_id, f_bus, t_bus, length, way, voltage, cables, wires, frequency, power 
-		FROM power_line_sep ;
+		FROM power_line_sep ORDER BY relation_id, line_id, voltage, frequency, f_bus, t_bus, cables, wires;
 
 
 
@@ -1058,7 +1062,7 @@ ALTER TABLE branch_data ADD COLUMN spec_id INT;
 UPDATE branch_data 
 	SET spec_id = (SELECT spec_id FROM branch_specifications
 				WHERE 	branch_specifications.power = branch_data.power
-				ORDER BY @((branch_data.voltage/1000) - branch_specifications.voltage_kv) -- Nach kleinstem Abstand zur Angegenen Spannung
+				ORDER BY @((branch_data.voltage/1000) - branch_specifications.voltage_kv), branch_specifications.spec_id -- Nach kleinstem Abstand zur Angegenen Spannung
 					 LIMIT 1)
 		WHERE power = 'line' OR power = 'cable';
 
@@ -1129,7 +1133,7 @@ UPDATE bus_data
 			WHERE substation_id = (SELECT val_int 
 						FROM abstr_values 
 						WHERE val_description = 'main_station')
-			ORDER BY voltage DESC
+			ORDER BY voltage DESC, id
 			LIMIT 1);
 	
 

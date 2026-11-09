@@ -185,7 +185,9 @@ DROP TABLE IF EXISTS transfer_busses;
 CREATE TABLE transfer_busses(
 		osm_id BIGINT,
 		object_type TEXT,
-		center_geom geometry (Point, 4326));
+		center_geom geometry (Point, 4326),
+		voltages INT[], -- voltages of the substation, from egon-data
+		target_voltage INT); -- preferred connection voltage, from egon-data
 ALTER TABLE transfer_busses
 	ADD CONSTRAINT tb_osm_id_pk primary key (osm_id); 
 CREATE INDEX tb_osm_id_idx ON transfer_busses(osm_id);
